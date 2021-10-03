@@ -9,8 +9,8 @@ from cryptofeed.exchanges import Binance
 global_klines = []
 
 ######################################## [S] CCXT
-API_KEY= "API_KEY"
-API_SECRET= "API_SECRET"
+API_KEY= ""
+API_SECRET= ""
 
 exchange = ccxt.binance({
     'apiKey': API_KEY,
