@@ -3,10 +3,30 @@ import pandas_ta as ta
 import pandas as pd
 import time, websocket, json,numpy, sqlite3,ccxt
 
+# CryptoFeed
 from cryptofeed import FeedHandler
 from cryptofeed.exchanges import Binance
 
-global_klines = []
+conn = sqlite3.connect(':memory:', check_same_thread=False, isolation_level=None) # multi.sqlite
+conn.execute('pragma journal_mode=wal')
+create_table = """
+    CREATE TABLE "kline" (
+    "id"	INTEGER NOT NULL,
+    "t_open" NUMERIC,
+    "t_close" NUMERIC,
+    "s"	TEXT,
+    "o"	NUMERIC,
+    "c"	NUMERIC,
+    "h"	NUMERIC,
+    "l"	NUMERIC,
+    "v"	NUMERIC,
+    "x"	INTEGER,
+    PRIMARY KEY("id" AUTOINCREMENT)
+    )
+"""
+conn.execute(create_table)
+conn.commit()
+print("Database Connected")
 
 ######################################## [S] CCXT
 API_KEY= ""
@@ -45,20 +65,39 @@ def ohlcv(symbol,interval,limit):
     for kline in klines:
         if kline == last_kline:
             is_closed = False
-        obj = {}
-        obj['s'] = symbol
-        obj['t'] = kline[0] # open_time
-        obj['o'] = kline[1] # open
-        obj['c'] = kline[2] # close
-        obj['h'] = kline[3] # high
-        obj['l'] = kline[4] # low
-        obj['v'] = kline[5] # volume
-        obj['T'] = kline[6] # close_time
-        obj['x'] = is_closed
-        global_klines.append(obj)
-    return global_klines
+        conn.execute(f"INSERT INTO kline (s,t_open,o,c,h,l,v,t_close,x) VALUES ('{symbol}', {kline[0]}, {kline[1]}, {kline[2]}, {kline[3]}, {kline[4]}, {kline[5]}, {kline[6]}, {is_closed})")
+        conn.commit()
 
 ######################################## [E] CCXT
+
+######################################## [S] DB
+def update_db(data):
+    # Extract data
+    t_open = data['t']
+    t_close = data['T']
+    s = data['s']
+    o = data['o']
+    c = data['c']
+    h = data['h']
+    l = data['l']
+    v = data['v']
+    x = data['x']
+    
+    conn.execute(f"UPDATE kline SET t_open={t_open}, t_close={t_close}, s='{s}', o={o}, c={c}, h={h}, l={l}, v={v}, x={x} WHERE s='{s}' AND x=False")
+    conn.commit()
+
+def insert_db(symbol):
+    conn.execute(f"INSERT INTO kline (s,x) VALUES ('{symbol}', False)")
+    conn.commit()
+
+def delete_db():
+    conn.execute(f"DELETE FROM kline WHERE x=True AND t_close <= (strftime('%s','now', '-202 minutes')) * 1000")
+    conn.commit()
+
+def fetch_db():
+    return conn.execute("SELECT * FROM kline WHERE s='BTCUSDT'").fetchall()
+######################################## [E] DB
+
 def dif_time_in_minutes(asked_time):
     asked_time = int(asked_time) / 1000
     now = time.time()
@@ -71,29 +110,13 @@ def user_ws():
 
 def on_message(ws,message):
     data = json.loads(message)['k']
-    new_data = {
-        "t": data['t'],
-        "T": data['T'],
-        "s": data['s'],
-        "o": data['o'],
-        "c": data['c'],
-        "h": data['h'],
-        "l": data['l'],
-        "v": data['v'],
-        "x": data['x']
-    }
-    empty_template = {"t": 0,"T": 0,"s": data['s'],"o": "","c": "","h": "","l": "","v": "","x": False}
-    for kline in global_klines:
-        if kline: # not empty {}
-            if kline['x'] == False and data['s'] == kline['s']:
-                kline.update(new_data)
-            
-            # Delete older than 202 candles
-            if kline['x'] == True and dif_time_in_minutes(kline['t']) > 201:
-                kline.clear()
-            
+
+    update_db(data)
+
     if data['x'] == True:
-        global_klines.append(empty_template)
+        insert_db(data['s'])
+    
+    time.sleep(0.1)
     
 
 def on_open(ws):
@@ -108,6 +131,7 @@ def ws(stream_name):
     ws.run_forever()
 
 #############################################################################################
+
 def market_ws_multi(symbols,interval="1m",limit=199):
 
     for symbol in symbols:
@@ -132,7 +156,16 @@ def market_ws_multi(symbols,interval="1m",limit=199):
 #############################################################################################
 if __name__ == '__main__':
     exchange_symbols_data = exchange_symbols()
-    
-    market_ws_multi(exchange_symbols_data,limit=199)
+
+    market_ws_multi(exchange_symbols_data,limit=199) # ["BTCUSDT","ETCUSDT"]
+    # user_ws()
 
     print("ENDED BLOCK")
+
+    while True:
+        time_now = time.localtime()
+        seconds_time = int(time.strftime("%S", time_now))
+        if (seconds_time == 59):
+            delete_db()
+            print(fetch_db(), "\n")
+        time.sleep(1)
