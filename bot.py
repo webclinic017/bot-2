@@ -1,31 +1,14 @@
+import multiprocessing as mp
 import threading as tr
 import pandas_ta as ta
 import pandas as pd
 import time, websocket, json,numpy, sqlite3,ccxt
 
 # CryptoFeed
-from cryptofeed import FeedHandler
-from cryptofeed.exchanges import Binance
+# from cryptofeed import FeedHandler
+# from cryptofeed.exchanges import Binance
 
-conn = sqlite3.connect(':memory:', check_same_thread=False, isolation_level=None) # multi.sqlite
-conn.execute('pragma journal_mode=wal')
-create_table = """
-    CREATE TABLE "kline" (
-    "id"	INTEGER NOT NULL,
-    "t_open" NUMERIC,
-    "t_close" NUMERIC,
-    "s"	TEXT,
-    "o"	NUMERIC,
-    "c"	NUMERIC,
-    "h"	NUMERIC,
-    "l"	NUMERIC,
-    "v"	NUMERIC,
-    "x"	INTEGER,
-    PRIMARY KEY("id" AUTOINCREMENT)
-    )
-"""
-conn.execute(create_table)
-conn.commit()
+conn = sqlite3.connect('multi.sqlite', check_same_thread=False, isolation_level=None)
 print("Database Connected")
 
 ######################################## [S] CCXT
@@ -97,6 +80,13 @@ def delete_db():
 def fetch_db():
     return conn.execute("SELECT * FROM kline WHERE s='BTCUSDT'").fetchall()
 ######################################## [E] DB
+def split_array(array,split_array_parts,index):
+    length = len(array)
+    split_list = [array[i*length // split_array_parts: (i+1)*length // split_array_parts]
+                  for i in range(split_array_parts)]
+    split_index = split_list[index]
+    print(split_index)
+    return split_index
 
 def dif_time_in_minutes(asked_time):
     asked_time = int(asked_time) / 1000
@@ -128,17 +118,18 @@ def on_close(ws):
 def ws(stream_name):
     SOCKET = "wss://fstream.binance.com/ws/" + stream_name
     ws = websocket.WebSocketApp(SOCKET,on_open=on_open,on_close=on_close,on_message=on_message)
+    print(ws)
     ws.run_forever()
 
 #############################################################################################
-
 def market_ws_multi(symbols,interval="1m",limit=199):
-
+    print(mp.current_process())
+    
     for symbol in symbols:
         while True:
             time_now = time.localtime()
             seconds_time = int(time.strftime("%S", time_now))
-            print(seconds_time)
+            # print(seconds_time)
             if (seconds_time >= 2 and seconds_time <= 50):
                 # Fetch,Insert OHLCV
                 ohlcv(symbol,interval,limit)
@@ -151,21 +142,23 @@ def market_ws_multi(symbols,interval="1m",limit=199):
                 break
             time.sleep(1)
         time.sleep(1)
-    
+
+def market_ws_multi_process(symbols,process_and_array_split=2,interval="1m",limit=199):
+    for i in range(process_and_array_split):
+        your_array = split_array(symbols,process_and_array_split,i)
+        p = mp.Process(target=market_ws_multi,args=(your_array, interval, limit))
+        p.start()
 
 #############################################################################################
 if __name__ == '__main__':
     exchange_symbols_data = exchange_symbols()
-
-    market_ws_multi(exchange_symbols_data,limit=199) # ["BTCUSDT","ETCUSDT"]
-    # user_ws()
+    
+    market_ws_multi_process(["BTCUSDT"],limit=199) # exchange_symbols_data
+    # # user_ws()
 
     print("ENDED BLOCK")
 
-    while True:
-        time_now = time.localtime()
-        seconds_time = int(time.strftime("%S", time_now))
-        if (seconds_time == 59):
-            delete_db()
-            print(fetch_db(), "\n")
-        time.sleep(1)
+    # while True:
+    #     delete_db()
+    #     # print(fetch_db(), "\n")
+    #     time.sleep(60)
