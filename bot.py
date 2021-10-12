@@ -37,7 +37,7 @@ def split_array(array,parts,index):
     return split_index
 
 ################################################################################### Database
-memory_db = sqlite3.connect(':memory:', check_same_thread=False, isolation_level=None) # multi.sqlite
+memory_db = sqlite3.connect(':memory:', check_same_thread=False, isolation_level=None)
 memory_db.execute('pragma journal_mode=wal')
 create_table = """
     CREATE TABLE "kline" (
