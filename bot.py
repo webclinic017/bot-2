@@ -114,7 +114,7 @@ def delete_stream(id):
 CONFIG_TEST = "TEST"
 
 ################################################################################### HTTP Request
-# ======  begin of functions, you don't need to touch ======
+# ======  start functions ======
 def base_url_finder(url_path):
     base_url = ""
     if url_path.find("/fapi") != -1:
@@ -176,7 +176,7 @@ def send_public_request(url_path, payload={}):
     print("{}".format(url))
     response = dispatch_request('GET', api_key="")(url=url)
     return response.json()
-#  ======  end of functions ======
+#  ======  end functions ======
 
 def exchange_symbols():
     exchange_info = send_public_request("/fapi/v1/exchangeInfo")
