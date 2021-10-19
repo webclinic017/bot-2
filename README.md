@@ -5,6 +5,7 @@
 - Unlimited Strategies Per User
 - Custom Strategies (MA Cross,RSI Over Bought/Sold, etc)
 - Compound Profit Per Strategy **OR** Using Fix Amount (On/Off)
+- Profit Table Per Strategy
 - Money Managment
 - Multi Time Frame
 - Telegram Notification
