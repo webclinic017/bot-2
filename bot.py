@@ -127,7 +127,7 @@ def delete_stream(id):
 CONFIG_TEST = "TEST"
 
 ################################################################################### HTTP Request
-# ======  begin of functions, you don't need to touch ======
+# ======  begin of functions ======
 def base_url_finder(url_path: str):
     base_url = ""
     if url_path.startswith("/fapi"):
@@ -290,26 +290,9 @@ def best_symbol_finder():
     print("Search Best Symbols, Then Insert It Into Database, Do it Every 15min/30min")
 
 def panda_strategy_maker(symbol, panda_strategy_list):
-    # "Output: DataFrame (ohlcv,rsi, ema,...)"
     klines = fetch_kline(symbol)
-    json_kline = []
-    for kline in klines:
-        t = kline[1]
-        o = kline[4]
-        h = kline[5]
-        l = kline[6]
-        c = kline[7]
-        v = kline[8]
-        json_kline.append({"time":t, "open":o, "high":h, "low":l, "close": c, "volume":v})
-    
-    df = ta.DataFrame(json_kline)
-    MyStrategy = ta.Strategy(
-        name="Strategy",
-        ta=panda_strategy_list
-    )
-    df.ta.strategy(MyStrategy)
+    df = ta.DataFrame(klines)
     return df
-
 
 def strategy(symbol, file_to_load, panda_strategy_list):
     panda_df = panda_strategy_maker(symbol, panda_strategy_list)    
@@ -323,22 +306,28 @@ def strategy_tpsl():
 
 def user_strategy():
     while True:
-        strategies = db.execute("SELECT * FROM user_strategy INNER JOIN strategy WHERE is_active=True").fetchall()
+        strategies = db.execute("SELECT * FROM user_strategy INNER JOIN strategy WHERE is_active=True and in_position=False").fetchall()
         for ust in strategies: # user_strategy = ust
+            is_active = ust[3]
             in_position = ust[4]
             file = ust[16]
             panda_strategy_list = json.loads(ust[17])
             symbol = ust[7]
-            # if in_position:
-            indicator_result = strategy(symbol,file,panda_strategy_list)
-            # if indicator_result == 1:
-            # if indicator_result == 2:
-        time.sleep(5)
+            
+            result = strategy(symbol,file,panda_strategy_list)
+            # if in result there is tpsl, then trigger strategy_tpsl_multi():
+            # if result == 1: # buy
+            # if result == 2: # sell
+        time.sleep(10)
 
 ################################################################################### Multi Processing - Threading
 def strategy_multi():
-    print("in progress...")
+    t = tr.Thread(target=user_strategy)
+    t.start()
 
+def strategy_tpsl_multi():
+    print("TEST")
+ 
 def market_kline_ws_multi(symbol: str,interval="1m",limit=199):
     
     can_i_go = time_condition()
@@ -423,21 +412,6 @@ if __name__ == '__main__':
 
     # User Stream
     # user_data_ws_multi(1)
-    # data = {
-    #     "t":1,
-    #     "T":1,
-    #     "s":"BTCUSDT",
-    #     "o":1,
-    #     "c":1,
-    #     "h":1,
-    #     "l":1,
-    #     "v":1,
-    #     "x":True,
-    # }
-    # update_kline(data)
-    # t = fetch_kline("ETCUSDT")
-    # print(t)
-    # delete_kline()
 
     time.sleep(5)
-    user_strategy()
+    strategy_multi()
