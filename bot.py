@@ -1,3 +1,4 @@
+import multiprocessing as mp
 import threading as tr
 import pandas_ta as ta
 import pandas as pd
@@ -8,10 +9,21 @@ import sqlite3
 import hmac
 import hashlib
 import requests
+import importlib
 from urllib.parse import urlencode
 
 ws_list = []
 ################################################################################### Helper (Utils)
+def time_condition():
+    while True:
+        time_now = time.localtime()
+        seconds_time = int(time.strftime("%S", time_now))
+        print(seconds_time)
+        if (2 <= seconds_time <= 50):
+            break
+        time.sleep(1)
+    return True
+
 def extract_string(string:str,start="",end=""):
     _start = string.find(start) + 1
     _end   = string.find(end, _start)
@@ -37,7 +49,7 @@ def split_array(array,parts,index):
     return split_index
 
 ################################################################################### Database
-memory_db = sqlite3.connect(':memory:', check_same_thread=False, isolation_level=None)
+memory_db = sqlite3.connect(':memory:', check_same_thread=False, isolation_level=None) # multi.sqlite
 memory_db.execute('pragma journal_mode=wal')
 create_table = """
     CREATE TABLE "kline" (
@@ -63,10 +75,10 @@ db.execute('pragma journal_mode=wal')
 print("File: Database Connected")
 
 def fetch_kline(symbol):
-    return memory_db.execute(f"SELECT * FROM kline WHERE s='{symbol}'").fetchall()
+    return memory_db.execute("SELECT * FROM kline WHERE s=?", [symbol]).fetchall()
 
 def insert_kline(symbol):
-    memory_db.execute(f"INSERT INTO kline (s,x) VALUES ('{symbol}', False)")
+    memory_db.execute("INSERT INTO kline (s,x) VALUES (?, False)", [symbol])
     memory_db.commit()
 
 def update_kline(data):
@@ -80,48 +92,49 @@ def update_kline(data):
     l = data['l']
     v = data['v']
     x = data['x']
-    
-    memory_db.execute(f"UPDATE kline SET t_open={t_open}, t_close={t_close}, s='{s}', o={o}, c={c}, h={h}, l={l}, v={v}, x={x} WHERE s='{s}' AND x=False")
+
+    params = [t_open,t_close,s,o,c,h,l,v,x,s]
+    memory_db.execute("UPDATE kline SET t_open=?, t_close=?, s=?, o=?, c=?, h=?, l=?, v=?, x=? WHERE s=? AND x=False", params)
     memory_db.commit()
 
 def delete_kline():
     while True:
-        memory_db.execute(f"DELETE FROM kline WHERE x=True AND t_close <= (strftime('%s','now', '-202 minutes')) * 1000")
+        memory_db.execute("""DELETE FROM kline WHERE x=True AND t_close <= (strftime('%s','now', '-202 minutes')) * 1000""")
         memory_db.commit()
         print("Database Cleaned")
         time.sleep(60)
 
 
 def fetch_user(user_id):
-    return db.execute(f"SELECT * FROM user WHERE id={user_id}").fetchone()
+    return db.execute("SELECT * FROM user WHERE id=?",[user_id]).fetchone()
 
 def fetch_all_user():
-    return db.execute(f"SELECT * FROM user WHERE is_active=True").fetchall()
+    return db.execute("SELECT * FROM user WHERE is_active=True").fetchall()
 
 def fetch_stream_list(id):
-    return db.execute(f"SELECT id FROM stream_list WHERE id={id}").fetchone()
+    return db.execute("SELECT id FROM stream_list WHERE id=?",[id]).fetchone()
 
 def fetch_all_stream_list():
-    return db.execute(f"SELECT * FROM stream_list").fetchall()
+    return db.execute("SELECT * FROM stream_list").fetchall()
 
 def delete_stream(id):
     print("Examples: ")
     on_close(id)       # close ws by id (ws_object needed)
     ws_list.remove(id) # remove ws_list by id
-    db.execute(f"DELETE FROM stream_list WHERE id={id}") # Delete it from database 
+    db.execute("DELETE FROM stream_list WHERE id=?",[id]) # Delete it from database 
 
 ################################################################################### CONFIG
 CONFIG_TEST = "TEST"
 
 ################################################################################### HTTP Request
-# ======  start functions ======
-def base_url_finder(url_path):
+# ======  begin of functions, you don't need to touch ======
+def base_url_finder(url_path: str):
     base_url = ""
-    if url_path.find("/fapi") != -1:
+    if url_path.startswith("/fapi"):
         base_url = "https://fapi.binance.com"
-    elif url_path.find("/api") != -1:
+    elif url_path.startswith("/api"):
         base_url = "https://api.binance.com"
-    elif url_path.find("/dapi") != -1:
+    elif url_path.startswith("/dapi"):
         base_url = "https://dapi.binance.com"
     else:
         base_url = "https://testnet.binancefuture.com"
@@ -176,7 +189,7 @@ def send_public_request(url_path, payload={}):
     print("{}".format(url))
     response = dispatch_request('GET', api_key="")(url=url)
     return response.json()
-#  ======  end functions ======
+#  ======  end of functions ======
 
 def exchange_symbols():
     exchange_info = send_public_request("/fapi/v1/exchangeInfo")
@@ -197,14 +210,15 @@ def ohlcv(symbol,interval,limit):
     params = {"symbol":symbol, "interval":interval, "limit":limit}
     klines = send_public_request("/fapi/v1/klines", params) # "BTCUSDT", "1m", 199
     print(symbol,"- Fetched OHLC")
-    print(klines)
+    # print(klines)
 
     last_kline = klines[-1]
     is_closed = True
     for kline in klines:
         if kline == last_kline:
             is_closed = False
-        memory_db.execute(f"INSERT INTO kline (s,t_open,o,c,h,l,v,t_close,x) VALUES ('{symbol}', {kline[0]}, {kline[1]}, {kline[2]}, {kline[3]}, {kline[4]}, {kline[5]}, {kline[6]}, {is_closed})")
+        params = [symbol,kline[0], kline[1], kline[2], kline[3], kline[4], kline[5], kline[6], is_closed]
+        memory_db.execute("INSERT INTO kline (s,t_open,o,c,h,l,v,t_close,x) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", params)
         memory_db.commit()
 
 def generate_listenKey(api_key):    
@@ -261,7 +275,7 @@ def ws(stream_name,callback,extra):
     ws = websocket.WebSocketApp(SOCKET,header=extra_header,on_open=on_open,on_close=on_close,on_message=callback)
     
     # Insert WS to DB for when server is dead
-    d = db.execute(f"INSERT INTO stream_list (stream_name,status, belong_to) VALUES ('{stream_name}', True, '{extra_belong_to}')")
+    d = db.execute("INSERT INTO stream_list (stream_name,status, belong_to) VALUES (?, True, ?)", [stream_name, extra_belong_to])
     db.commit()
     print(f"{stream_name} - Inserted Into Database")
     last_row = d.lastrowid
@@ -272,35 +286,75 @@ def ws(stream_name,callback,extra):
     ws.run_forever()
 
 ################################################################################### Strategy
-def strategy(symbol):
-    # if there is user_strategy active
-        # Fetch kline from database
-        # Use pandas
-    print("in progress...")
+def best_symbol_finder():
+    print("Search Best Symbols, Then Insert It Into Database, Do it Every 15min/30min")
+
+def panda_strategy_maker(symbol, panda_strategy_list):
+    # "Output: DataFrame (ohlcv,rsi, ema,...)"
+    klines = fetch_kline(symbol)
+    json_kline = []
+    for kline in klines:
+        t = kline[1]
+        o = kline[4]
+        h = kline[5]
+        l = kline[6]
+        c = kline[7]
+        v = kline[8]
+        json_kline.append({"time":t, "open":o, "high":h, "low":l, "close": c, "volume":v})
+    
+    df = ta.DataFrame(json_kline)
+    MyStrategy = ta.Strategy(
+        name="Strategy",
+        ta=panda_strategy_list
+    )
+    df.ta.strategy(MyStrategy)
+    return df
+
+
+def strategy(symbol, file_to_load, panda_strategy_list):
+    panda_df = panda_strategy_maker(symbol, panda_strategy_list)    
+    return importlib.import_module("Strategy." + file_to_load).strategy(panda_df)
+
+def strategy_test():
+    print("Dynamic import test() from /Strategy/*.py")
+
+def strategy_tpsl():
+    print("Dynamic import tpsl() from /Strategy/*.py")
+
+def user_strategy():
+    while True:
+        strategies = db.execute("SELECT * FROM user_strategy INNER JOIN strategy WHERE is_active=True").fetchall()
+        for ust in strategies: # user_strategy = ust
+            in_position = ust[4]
+            file = ust[16]
+            panda_strategy_list = json.loads(ust[17])
+            symbol = ust[7]
+            # if in_position:
+            indicator_result = strategy(symbol,file,panda_strategy_list)
+            # if indicator_result == 1:
+            # if indicator_result == 2:
+        time.sleep(5)
 
 ################################################################################### Multi Processing - Threading
 def strategy_multi():
     print("in progress...")
 
-def market_kline_ws_multi(symbol,interval="1m",limit=199):
+def market_kline_ws_multi(symbol: str,interval="1m",limit=199):
+    
+    can_i_go = time_condition()
 
-    while True:
-        time_now = time.localtime()
-        seconds_time = int(time.strftime("%S", time_now))
-        print(seconds_time)
-        if (seconds_time >= 2 and seconds_time <= 50):
-            # Fetch,Insert OHLCV
-            ohlcv(symbol,interval,limit)
-
-            # Run WS
-            symbol_lower = symbol.lower()
-            symbol_lower += "@kline_" + interval
-            extra = ["market_kline"]
-            t = tr.Thread(target=ws, args=[symbol_lower,market_kline_on_message,extra])
-            t.start()
-            break
-        time.sleep(1)
+    if can_i_go:
+        # Fetch,Insert OHLCV
+        ohlcv(symbol,interval,limit)
+        
+         # Run WS
+        symbol_lower = symbol.lower()
+        symbol_lower += "@kline_" + interval
+        extra = ["market_kline"]
+        t = tr.Thread(target=ws, args=[symbol_lower,market_kline_on_message,extra])
+        t.start()
     time.sleep(1)
+
 
 def user_data_ws_multi(user_id):
     user = fetch_user(user_id)
@@ -308,7 +362,7 @@ def user_data_ws_multi(user_id):
     id = user[0]
     api_key = user[3]
     listen_key = generate_listenKey(api_key)
-    db.execute("""UPDATE user SET listen_key=? WHERE id=?""", [listen_key,id])
+    db.execute("""UPDATE user SET listen_key=? WHERE id=?""", [listen_key, id])
     db.commit()
     
     # Listen Key
@@ -327,7 +381,7 @@ def clean_kline_db_multi():
 
 ################################################################################### IF SERVER Reboot
 def reboot_user_data():
-    db.execute(f"DELETE FROM stream_list WHERE belong_to='user_data'")
+    db.execute("DELETE FROM stream_list WHERE belong_to='user_data'")
     db.commit()
 
     users = fetch_all_user()
@@ -337,35 +391,53 @@ def reboot_user_data():
     
 
 def reboot_market_kline(interval="1m"):
-    streams = db.execute(f"SELECT * FROM stream_list WHERE belong_to='market_kline'").fetchall()
+    streams = db.execute("SELECT * FROM stream_list WHERE belong_to='market_kline'").fetchall()
     if len(ws_list) == 0:
         for stream in streams:
             id = stream[0]
             stream_name:str = stream[1]
             status = stream[2]
             
-            db.execute(f"DELETE FROM stream_list WHERE id={id}")
+            db.execute("DELETE FROM stream_list WHERE id=?", [id])
             db.commit()
 
             if status:
                 symbol = stream_name.replace("@kline_" + interval, "").upper()
                 market_kline_ws_multi(symbol)
 
+def reboot():
+    # check if internet connection died for 3minutes, then call this function one more time
+    reboot_market_kline()
+    reboot_user_data()
 ################################################################################### Sanic Framework
 
 ################################################################################### TEST
 
 ################################################################################### Run On Startup - Forever
 if __name__ == '__main__':
-    # reboot_market_kline()
-    # reboot_user_data()
+    # reboot()
     
     # Kline Stream
-    # market_kline_ws_multi("ETCUSDT",limit=20)
-    # clean_kline_db_multi()
-    # strategy("ETCUSDT")
+    market_kline_ws_multi("BTCUSDT",limit=20)
+    clean_kline_db_multi()
 
     # User Stream
     # user_data_ws_multi(1)
+    # data = {
+    #     "t":1,
+    #     "T":1,
+    #     "s":"BTCUSDT",
+    #     "o":1,
+    #     "c":1,
+    #     "h":1,
+    #     "l":1,
+    #     "v":1,
+    #     "x":True,
+    # }
+    # update_kline(data)
+    # t = fetch_kline("ETCUSDT")
+    # print(t)
+    # delete_kline()
 
-    print("TEST")
+    time.sleep(5)
+    user_strategy()
