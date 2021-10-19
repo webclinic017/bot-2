@@ -1,6 +1,7 @@
 # Binance Futures Bot (under development)
 
 # Bot Features
+- Web UI
 - Unlimited Users
 - Unlimited Strategies Per User
 - Custom Strategies (MA Cross,RSI Over Bought/Sold, etc)
