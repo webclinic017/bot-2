@@ -10,3 +10,6 @@
 - Money Managment
 - Multi Time Frame
 - Telegram Notification
+
+# LICENSE
+No LICENSE - Absolutely Free
