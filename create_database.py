@@ -33,15 +33,18 @@ def user_strategy():
         "is_active"	INTEGER DEFAULT 0,
         "in_position"	INTEGER DEFAULT 0,
         "is_compound"	INTEGER DEFAULT 0,
-        "order_id"	INTEGER,
+        "is_auto_symbol"	INTEGER DEFAULT 0,
+        "is_time_limited"	INTEGER DEFAULT 0,
+        "is_sl"	INTEGER DEFAULT 0,
+        "is_overwrite_tp"	INTEGER DEFAULT 0,
+        "is_overwrite_sl"	INTEGER DEFAULT 0,
+        "overwrite_tp_percent"	INTEGER,
+        "overwrite_sl_percent"	INTEGER,
         "symbol"	TEXT,
-        "side"	TEXT,
-        "type"	TEXT,
-        "quantity"	NUMERIC,
-        "price"	NUMERIC,
-        "uuid"	TEXT,
-        "stop_loss"	NUMERIC,
-        "take_profit"	NUMERIC,
+        "max_money"	NUMERIC,
+        "current_money"	NUMERIC,
+        "max_compound_money"	NUMERIC,
+        "time_end"	DATETIME,
         PRIMARY KEY("id" AUTOINCREMENT)
     );
     """
@@ -53,7 +56,6 @@ def strategy():
     CREATE TABLE "strategy" (
         "id"	INTEGER NOT NULL,
         "file"	TEXT,
-        "panda_strategy"	TEXT,
         PRIMARY KEY("id" AUTOINCREMENT)
     );
     """
@@ -64,13 +66,27 @@ def stream_list():
     create_table = """
     CREATE TABLE "stream_list" (
         "id"	INTEGER NOT NULL,
-        "stream_name"	TEXT,
+        "stream_name"	TEXT UNIQUE,
         "status"	INTEGER,
         "belong_to"	TEXT,
-        "created_at" DATETIME DEFAULT CURRENT_TIMESTAMP,
-        "updated_at" DATETIME DEFAULT CURRENT_TIMESTAMP,
+        "created_at"	DATETIME DEFAULT CURRENT_TIMESTAMP,
+        "updated_at"	DATETIME DEFAULT CURRENT_TIMESTAMP,
         PRIMARY KEY("id" AUTOINCREMENT)
     );
     """
     conn.execute(create_table)
     conn.commit()
+
+def user_strategy_pnl():
+    create_table = """
+    CREATE TABLE "user_strategy_pnl" (
+        "id"	INTEGER NOT NULL,
+        "client_order_id"	TEXT,
+        "pnl"	NUMERIC,
+        "fee"	NUMERIC,
+        PRIMARY KEY("id" AUTOINCREMENT)
+    );
+    """
+    conn.execute(create_table)
+    conn.commit()
+###########################
