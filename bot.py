@@ -4,14 +4,32 @@ import pandas_ta as ta
 import pandas as pd
 import math
 import time
+import datetime
 import websocket
 import json
-import sqlite3
 import hmac
 import hashlib
 import requests
 import importlib
+import bcrypt
+import jwt
 from urllib.parse import urlencode
+
+from db import db, memory_db
+from config import CONFIG_JWT_SECRET
+
+#
+from sanic import Sanic
+from sanic.exceptions import SanicException
+from sanic.response import json as json_output
+from sanic_cors import CORS, cross_origin
+from auth import protected
+# from login import login
+app = Sanic("my app")
+# app.blueprint(login)
+CORS(app)
+#
+
 
 ws_list = []
 df_list = []
@@ -70,10 +88,9 @@ def prevent(thread):
     max_thread = memory_db.execute("SELECT MAX(thread_id) FROM thread").fetchone()
     return max_thread[0]
 
+def throw_error(message="There Is Something Wrong", status=401):
+    return json_output({"error": {"message": message, "status": status}})
 ################################################################################### Database
-memory_db = sqlite3.connect(':memory:', check_same_thread=False, isolation_level=None)
-
-memory_db.execute('pragma journal_mode=wal')
 kline_table = """
     CREATE TABLE "kline" (
         "id"	INTEGER NOT NULL,
@@ -127,12 +144,14 @@ thread_table = """
     """
 memory_db.execute(thread_table)
 memory_db.commit()
-print("Memory: Database Connected")
 
 #########
-db = sqlite3.connect('bot.sqlite', check_same_thread=False, isolation_level=None)
-db.execute('pragma journal_mode=wal')
-print("File: Database Connected")
+def fetch_all_strategy():
+    return db.execute("SELECT * FROM strategy").fetchall()
+
+def insert_strategy(file):
+    db.execute("INSERT INTO strategy (file) VALUES (?)", [file])
+    db.commit()
 
 def fetch_kline_df(symbol):
     return memory_db.execute("SELECT t_open,o,h,l,c,v FROM kline WHERE s=?", [symbol]).fetchall()
@@ -177,8 +196,14 @@ def delete_kline():
 def fetch_user(user_id):
     return db.execute("SELECT * FROM user WHERE id=?",[user_id]).fetchone()
 
+def fetch_user_by_username(username):
+    return db.execute("SELECT * FROM user WHERE username=?",[username]).fetchone()
+
 def fetch_all_user():
     return db.execute("SELECT * FROM user WHERE is_active=True").fetchall()
+
+def fetch_user_strategy_by_user_id(user_id):
+    return db.execute("SELECT * FROM user_strategy INNER JOIN strategy WHERE user_id=?", [user_id]).fetchall()
 
 def fetch_all_user_strategy():
     return db.execute("SELECT * FROM user_strategy INNER JOIN strategy").fetchall()
@@ -238,6 +263,10 @@ def update_user_strategy_in_position(position_status, id):
     db.execute("""UPDATE user_strategy SET in_position=? WHERE id=?""", [position_status, id])
     db.commit()
 
+def update_user_strategy_no_money(id):
+    db.execute("""UPDATE user_strategy SET in_position=True, is_active=False WHERE id=?""", [id])
+    db.commit()
+
 def update_user_strategy_current_money(current_money, id):
     db.execute("""UPDATE user_strategy SET current_money=? WHERE id=?""", [current_money, id])
     db.commit()
@@ -245,6 +274,17 @@ def update_user_strategy_current_money(current_money, id):
 def update_user_strategy_is_sl(boolean, id):
     db.execute("""UPDATE user_strategy SET is_sl=? WHERE id=?""", [boolean, id])
     db.commit()
+
+def update_user_strategy_auto_symbol_name(auto_symbol_name, id):
+    db.execute("""UPDATE user_strategy SET auto_symbol_name=? WHERE id=?""", [auto_symbol_name, id])
+    db.commit()
+
+def insert_user_strategy(columns, questions, data):
+    try:
+        db.execute("INSERT INTO user_strategy ({}) VALUES ({})".format(columns , questions), data)
+        db.commit()
+    except:
+        return False
 
 def insert_user_strategy_pnl(data):
     client_order_id = data[0]
@@ -497,15 +537,14 @@ def user_data_on_message(ws,message):
                 new_current_money = current_money + pnl - fee
                 update_user_strategy_current_money(new_current_money, row_id)
 
-                # Update TP
+                # Use Case: For On Fly TP
                 if clientID.startswith("tp0"):
                     update_user_strategy_is_sl(False, row_id)
                 elif clientID.startswith("sl0"):
                     update_user_strategy_is_sl(True, row_id)
                 
-                # Cancel Other TP / SL
+                # Cancel TP or SL
                 if clientID.startswith("tp0") or clientID.startswith("sl0"):
-                    # Cancel TP/SL
                     user = fetch_user(user_id)
                     api_key = user[3]
                     api_secret = user[4]
@@ -544,12 +583,6 @@ def ws(stream_name, callback, extra):
 def spider_symbol_percent():
     while True:
         exchange = fetch_exchange_info_all()
-        # exchange = [ # TEST
-        #     (0,"ADAUSDT"),
-        #     (1,"BNBUSDT"),
-        #     (2,"XRPUSDT"),
-        #     (3,"TRXUSDT"),
-        # ]
         for data in exchange:
             symbol = data[1]
             klines = ohlcv(symbol, "1m", 99)
@@ -566,6 +599,7 @@ def spider_symbol_percent():
             time.sleep(0.5)
         time.sleep(60 * 30)
 
+# @ Unused
 def spider_create_df():
     while True:
         streams = fetch_stream_list_kline()
@@ -600,12 +634,18 @@ def strategy(symbol, file_to_load):
     df = ta.DataFrame(klines)
     return importlib.import_module("Strategy." + file_to_load).strategy(df)
 
-def strategy_order(data, signal):
+def strategy_order(data, signal, overwrite):
     api_key = data[0]
     api_secret = data[1]
     symbol = data[2]
     quantity = data[3]
     uuid = data[4]
+
+    last_close = overwrite[0]
+    is_overwrite_tp = overwrite[1]
+    is_overwrite_sl = overwrite[2]
+    overwrite_tp_percent = overwrite[3]
+    overwrite_sl_percent = overwrite[4]
 
     ione = fetch_exchange_info_one(symbol)
     pricePrecision = ione[2]
@@ -625,13 +665,36 @@ def strategy_order(data, signal):
         if order["status"] == "NEW":
             # Stop Loss
             stoploss = signal[2]
+            
+            # over write SL
+            if is_overwrite_sl:
+                if side == "BUY":
+                    # stoploss = last_close * overwrite_sl_percent
+                    stoploss = last_close - (last_close * (overwrite_sl_percent / 100))
+                elif side == "SELL":
+                    # stoploss = last_close * overwrite_sl_percent
+                    stoploss = last_close + (last_close * (overwrite_sl_percent / 100))
+
+            
             stoploss = perc(stoploss, pricePrecision)
+            
             new_order(api_key, api_secret, symbol, swap_side, "STOP_MARKET", quantity, "sl0" + uuid, stoploss, positionSide)
 
             # if Take Profit Comes, Submit Take Profit
             if len(signal) == 4:
                 takeprofit = signal[3]
+
+                # over write TP
+                if is_overwrite_tp:
+                    if side == "BUY":
+                        # takeprofit = last_close * overwrite_tp_percent
+                        takeprofit = last_close + (last_close * (overwrite_tp_percent / 100))
+                    elif side == "SELL":
+                        # takeprofit = last_close * overwrite_tp_percent
+                        takeprofit = last_close - (last_close * (overwrite_tp_percent / 100))
+                
                 takeprofit = perc(takeprofit, pricePrecision)
+
                 new_order(api_key, api_secret, symbol, swap_side, "TAKE_PROFIT_MARKET", quantity, "tp0" + uuid, takeprofit, positionSide)
 
 def user_strategy(_id):
@@ -645,17 +708,18 @@ def user_strategy(_id):
         is_compound = data[5]
         is_auto_symbol = data[6]
         is_time_limited = data[7]
-        is_sl = data[8] # will not use here
+        is_sl = data[8] # never use here
         is_overwrite_tp = data[9]
         is_overwrite_sl = data[10]
         overwrite_tp_percent = data[11]
         overwrite_sl_percent = data[12]
         symbol = data[13]
-        max_money = data[14]
-        current_money = data[15]
-        max_compound_money = data[16]
-        time_end = data[17]
-        file = data[19]
+        auto_symbol_name = data[14]
+        max_money = data[15]
+        current_money = data[16]
+        max_compound_money = data[17]
+        time_end = data[18]
+        file = data[20]
 
         uuid = f"i{id}u{user_id}"
         current_thread_id = tr.get_ident()
@@ -682,6 +746,10 @@ def user_strategy(_id):
                 max_thread = prevent(current_thread_id)
                 if current_thread_id == max_thread:
                     market_kline_ws_multi(order_symbol)
+                    
+                    # Update auto_symbol_name, later use for detecting AFK Websockets
+                    update_user_strategy_auto_symbol_name(order_symbol, id)
+
                     # flush thread
                     memory_db.execute("DELETE FROM thread")
                     memory_db.commit()
@@ -710,11 +778,11 @@ def user_strategy(_id):
                             money = current_money * CONFIG_MONEY_MARGIN
                         else:
                             if max_money <= current_money:
-                                money = max_money * CONFIG_MONEY_MARGIN
+                                money = max_money * CONFIG_MONEY_MARGIN # always do orders with fix amount of money
                             else: 
                                 money = 0 # you dont have enough money
                     else:
-                        money = 0
+                        money = 0 # your orders might not fill, because your money is huge (example: +$50k)
 
                     total_money = leverage * money
                     quantity = total_money / last_close_price
@@ -724,8 +792,10 @@ def user_strategy(_id):
                     order_params = [api_key, api_secret, order_symbol, quantity, new_uuid]
 
                     if quantity >= minQty:
+
+                        overwrite = [last_close_price, is_overwrite_tp, is_overwrite_sl, overwrite_tp_percent, overwrite_sl_percent]
                         update_user_strategy_in_position(True, id)
-                        strategy_order(order_params, signal)
+                        strategy_order(order_params, signal, overwrite)
                     
                         # ["buy", close, SL] # TP is on fly
                         if len(signal) == 3:
@@ -733,7 +803,7 @@ def user_strategy(_id):
                             strategy_tp_multi(order_params, side, file)
                     else:
                         print("You dont have enough money")
-                        update_user_strategy_in_position(True, id)
+                        update_user_strategy_no_money(id)
         time.sleep(2)    
 
 def strategy_test():
@@ -834,7 +904,7 @@ def user_data_ws_multi(user_id):
     
     # Listen Key
     header = {"X-MBX-APIKEY": api_key}
-    extra = [f"user_data", header]
+    extra = [f"user_data:{id}", header]
     thread_listen_key = tr.Thread(target=ws, args=[listen_key,user_data_on_message, extra])
     thread_listen_key.start()
 
@@ -848,7 +918,7 @@ def clean_kline_db_multi():
 
 ################################################################################### IF SERVER Reboot
 def reboot_user_data():
-    db.execute("DELETE FROM stream_list WHERE belong_to='user_data'")
+    db.execute("DELETE FROM stream_list WHERE belong_to LIKE 'user_data%'")
     db.commit()
 
     users = fetch_all_user()
@@ -875,22 +945,228 @@ def reboot():
     # check if internet connection died for 3minutes, then call this function one more time
     reboot_market_kline()
     reboot_user_data()
-################################################################################### Sanic Framework
-# Sanic|Flask here
+################################################################################### Sanic
+def string_to_bytes(string):
+    string = bytes(string,'utf-8')
+    return string
+
+def jwt_decode(token):
+    return jwt.decode(token, CONFIG_JWT_SECRET, algorithms=["HS256"])
+
+def jwt_signed_user(user):
+    # user = fetch_user
+    user_id = user[0]
+    user_username = user[1]
+    user_role = user[8]
+    user_is_active = user[9]
+
+    payload = {"id": user_id, "username": user_username, "role": user_role, "active": user_is_active}
+    return jwt.encode(payload, CONFIG_JWT_SECRET) # token
+
+def utctimestamp(ts: str, DATETIME_FORMAT: str = "%Y-%m-%dT%H:%M"):
+    import datetime, calendar
+    ts = datetime.datetime.utcnow() if ts is None else datetime.datetime.strptime(ts, DATETIME_FORMAT)
+    return calendar.timegm(ts.utctimetuple())
+
+@app.post("/login")
+async def login(request):
+    try:
+        username = request.json.get("username")
+        password = request.json.get("password")
+        if username and password:
+            user = fetch_user_by_username(username)
+
+            if user:    
+                user_password = user[2]
+                user_role = user[8]
+                user_is_active = user[9]
+                
+                if user_is_active == 0 or user_role == "ban":
+                    return throw_error("Your account is disabled")
+                
+                password = string_to_bytes(password)
+                user_password = string_to_bytes(user_password)
+
+                check_password = bcrypt.checkpw(password, user_password)
+                
+                if check_password:
+                    token = jwt_signed_user(user)
+                    return json_output({"jwt": token})
+                else:
+                    return throw_error("password error") # username or password is wrong
+            else:
+                return throw_error("user does not exits")
+        else:
+            return throw_error("username or password is wrong")
+    except:
+        return throw_error()
+
+
+@app.get("/exchange_info")
+async def exchangeinfo(request):
+    try:
+        exchange = fetch_exchange_info_all()
+        data = list(exchange)
+        return json_output({"data": data})
+    except:
+        return throw_error()
+
+@app.get("/strategy")
+@protected
+async def strategy(request):
+    try:
+        strategies = fetch_all_strategy()
+        data = list(strategies)
+        return json_output({"data": data})
+    except:
+        return throw_error()
+
+@app.post("/strategy")
+@protected
+async def strategy(request):
+    try: 
+        file = request.json.get("file")
+        payload = jwt_decode(request.token)
+        role = payload["role"]
+        if role == "admin":
+            insert_strategy(file)
+            return json_output({"data": file + " inserted"})
+        else: 
+            return throw_error("You can not create strategy, you are not admin")
+    except:
+        return throw_error()
+
+
+@app.get("/user_strategy")
+@protected
+async def user_strategy(request):
+    try:
+        payload = jwt_decode(request.token)
+        user_id = payload["id"]
+        strategies = fetch_user_strategy_by_user_id(user_id)
+        strategies_list = list(strategies)
+        return json_output({"data": strategies_list})
+    except:
+        return throw_error("Wrong")
+
+@app.post("/user_strategy")
+@protected
+async def user_strategy(request):
+    try:
+        payload = jwt_decode(request.token)
+        user_id = payload["id"]
+        
+        columns = "user_id"
+        questions = "?"
+        data: list = [int(user_id)]
+
+        is_compound = request.json.get("is_compound")
+        if is_compound:
+            columns += ",is_compound"
+            questions += ",?"
+            data.append(int(is_compound))
+
+        is_auto_symbol = request.json.get("is_auto_symbol")
+        if is_auto_symbol:
+            columns += ",is_auto_symbol"
+            questions += ",?"
+            data.append(int(is_auto_symbol))
+
+        is_time_limited = request.json.get("is_time_limited")
+        if is_time_limited:
+            columns += ",is_time_limited"
+            questions += ",?"
+            data.append(int(is_time_limited))
+
+        is_overwrite_tp = request.json.get("is_overwrite_tp")
+        if is_overwrite_tp:
+            columns += ",is_overwrite_tp"
+            questions += ",?"
+            data.append(int(is_overwrite_tp))
+
+        is_overwrite_sl = request.json.get("is_overwrite_sl")
+        if is_overwrite_sl:
+            columns += ",is_overwrite_sl"
+            questions += ",?"
+            data.append(int(is_overwrite_sl))
+
+        overwrite_tp_percent = request.json.get("overwrite_tp_percent")
+        if overwrite_tp_percent:
+            columns += ",overwrite_tp_percent"
+            questions += ",?"
+            data.append(float(overwrite_tp_percent))
+
+        overwrite_sl_percent = request.json.get("overwrite_sl_percent")
+        if overwrite_sl_percent:
+            columns += ",overwrite_sl_percent"
+            questions += ",?"
+            data.append(float(overwrite_sl_percent))
+
+        symbol = request.json.get("symbol")
+        if symbol:
+            columns += ",symbol"
+            questions += ",?"
+            data.append(symbol)
+
+        auto_symbol_name = request.json.get("auto_symbol_name")
+        if auto_symbol_name:
+            columns += ",auto_symbol_name"
+            questions += ",?"
+            data.append(int(auto_symbol_name))
+
+        # init => max_money = current_money
+        max_money = request.json.get("max_money")
+        if max_money:
+            columns += ",max_money,current_money"
+            questions += ",?,?"
+            max_money = float(max_money)
+            data.append(max_money, max_money)
+
+        max_compound_money = request.json.get("max_compound_money")
+        if max_compound_money:
+            columns += ",max_compound_money"
+            questions += ",?"
+            data.append(float(max_compound_money))
+
+        time_end = request.json.get("time_end")
+        if time_end:
+            columns += ",time_end"
+            questions += ",?"
+            time_end = utctimestamp(time_end)
+            data.append(float(time_end))
+
+        # file = strategy_id
+        file = request.json.get("file")
+        if file:
+            columns += ",file"
+            questions += ",?"
+            data.append(int(file))
+
+        print(columns, questions, data)
+
+        # insert_user_strategy("strategy_id", "?", [5511])
+
+        package = [columns, questions, data]
+        return json_output({"data": package})
+    except:
+        return throw_error("ERROR")
 
 ################################################################################### Run On Startup - Forever
 if __name__ == '__main__':
     # # reboot()
-    exchange_info()
-    spider_symbol_percent_multi()
-    wait_for_exchange_info()
+    # exchange_info()
+    # spider_symbol_percent_multi()
+    # wait_for_exchange_info()
     
     # Kline Stream
-    clean_kline_db_multi()
+    # clean_kline_db_multi()
 
-    # # # User Stream
-    time.sleep(1)
-    user_data_ws_multi(1)
+    # # # User Stream <- From User Dashboard
+    # time.sleep(1)
+    # user_data_ws_multi(1)
 
-    time.sleep(5)
-    strategy_multi()
+    # time.sleep(5)
+    # strategy_multi()
+
+    # Sanic
+    app.run()
